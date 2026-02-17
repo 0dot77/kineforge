@@ -106,6 +106,7 @@ interface RuntimeState {
 }
 
 interface RuntimeMonitor {
+  frame: number;
   fps: number;
   frameMs: number;
   loadPercent: number;
@@ -735,13 +736,21 @@ function ModernNodeCard({
         ))}
       </div>
 
-      <div className="relative mt-3 overflow-hidden rounded-xl border border-white/12 bg-slate-900/80">
-        {data.previewUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={data.previewUrl} alt={`${data.title} preview`} className="aspect-video h-auto w-full object-cover" />
-        ) : (
-          <div className="grid aspect-video place-items-center px-3 text-center text-xs text-slate-400">{data.previewHint}</div>
-        )}
+      <div
+        className={`grid transition-[grid-template-rows,margin,opacity] duration-200 ease-out ${
+          isPreviewEnabled ? 'mt-3 grid-rows-[1fr] opacity-100' : 'mt-0 grid-rows-[0fr] opacity-0'
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="relative overflow-hidden rounded-xl border border-white/12 bg-slate-900/80">
+            {data.previewUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={data.previewUrl} alt={`${data.title} preview`} className="aspect-video h-auto w-full object-cover" />
+            ) : (
+              <div className="grid aspect-video place-items-center px-3 text-center text-xs text-slate-400">{data.previewHint}</div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -754,6 +763,7 @@ export function NodeStudio() {
   const [statusText, setStatusText] = useState('Idle');
   const [debugText, setDebugText] = useState('No frames yet. Tap the Live icon to start camera access.');
   const [runtimeMonitor, setRuntimeMonitor] = useState<RuntimeMonitor>({
+    frame: 0,
     fps: 0,
     frameMs: 0,
     loadPercent: 0,
@@ -979,6 +989,7 @@ export function NodeStudio() {
     runtime.frameCostMs = 0;
     setRuntimeMonitor((prev) => ({
       ...prev,
+      frame: 0,
       fps: 0,
       frameMs: 0,
       loadPercent: 0,
@@ -1433,6 +1444,7 @@ export function NodeStudio() {
 
           setRuntimeMonitor((prev) => ({
             ...prev,
+            frame: runtime.frameCount,
             fps: Number.isFinite(fps) ? Number(fps.toFixed(1)) : 0,
             frameMs: Number(runtime.frameCostMs.toFixed(2)),
             loadPercent: Number(loadPercent.toFixed(1)),
@@ -1609,6 +1621,27 @@ export function NodeStudio() {
         Double-click empty canvas to summon Kineforge node picker
       </div>
 
+      <aside className="pointer-events-none fixed right-4 top-4 z-30 w-[320px]">
+        <div className="pointer-events-auto rounded-2xl border border-white/12 bg-slate-950/86 p-3 shadow-[0_24px_90px_rgba(2,6,23,0.62)] backdrop-blur-2xl">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-lime-200/85">Runtime Status</p>
+            <StatusBadge status={status} label={statusText} />
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <MonitorStat label="Frame" value={String(runtimeMonitor.frame)} />
+            <MonitorStat label="FPS" value={runtimeMonitor.fps.toFixed(1)} />
+            <MonitorStat label="Frame ms" value={runtimeMonitor.frameMs.toFixed(2)} />
+            <MonitorStat label="CPU Proxy" value={`${runtimeMonitor.loadPercent.toFixed(0)}%`} />
+            <MonitorStat label="Heap" value={runtimeMonitor.memoryMb !== null ? `${runtimeMonitor.memoryMb.toFixed(1)} MB` : 'n/a'} />
+            <MonitorStat label="GPU Mode" value={runtimeMonitor.webgpuSupported ? 'WebGPU Ready' : 'Fallback'} />
+          </div>
+          <p className={`mt-2 text-[10px] ${runtimeMonitor.webgpuSupported ? 'text-lime-200/90' : 'text-rose-200/90'}`}>
+            WebGPU: {runtimeMonitor.webgpuSupported ? runtimeMonitor.webgpuLabel : 'Unavailable'}
+          </p>
+          <p className="mt-1 truncate text-[10px] text-slate-300/85">{debugText}</p>
+        </div>
+      </aside>
+
       {nodePicker.open && (
         <div className="fixed inset-0 z-40" onMouseDown={closeNodePicker}>
           <div className="absolute inset-0 bg-black/35 backdrop-blur-[1px]" />
@@ -1665,33 +1698,14 @@ export function NodeStudio() {
         <div className="relative flex h-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/86 shadow-[0_28px_120px_rgba(2,6,23,0.74)] backdrop-blur-2xl">
           <div className="flex items-center justify-between border-b border-white/10 px-3 py-2.5">
             <div>
-              <p className="text-[10px] uppercase tracking-[0.18em] text-lime-200/85">PiP Monitor</p>
-              <p className="text-xs text-slate-300/80">우하단 실시간 결과 모니터</p>
+              <p className="text-[10px] uppercase tracking-[0.18em] text-lime-200/85">Final Output</p>
+              <p className="text-xs text-slate-300/80">우하단 실시간 결과 캔버스</p>
             </div>
-            <div className="flex items-center gap-2">
-              <StatusBadge status={status} label={statusText} />
-            </div>
+            <span className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${status === 'live' ? 'text-lime-200' : status === 'loading' ? 'text-amber-200' : 'text-slate-300'}`}>
+              {status === 'live' ? 'Live' : status === 'loading' ? 'Loading' : 'Idle'}
+            </span>
           </div>
-
-          <div className="border-b border-white/10 bg-slate-950/88 p-2.5">
-            <div className="grid grid-cols-2 gap-2">
-              <MonitorStat label="FPS" value={runtimeMonitor.fps.toFixed(1)} />
-              <MonitorStat label="Frame ms" value={runtimeMonitor.frameMs.toFixed(2)} />
-              <MonitorStat label="CPU Proxy" value={`${runtimeMonitor.loadPercent.toFixed(0)}%`} />
-              <MonitorStat label="Heap" value={runtimeMonitor.memoryMb !== null ? `${runtimeMonitor.memoryMb.toFixed(1)} MB` : 'n/a'} />
-            </div>
-            <p
-              className={`mt-2 text-[10px] ${
-                runtimeMonitor.webgpuSupported ? 'text-lime-200/90' : 'text-rose-200/90'
-              }`}
-            >
-              WebGPU: {runtimeMonitor.webgpuSupported ? runtimeMonitor.webgpuLabel : 'Unavailable'}
-            </p>
-          </div>
-
-          <canvas ref={stageCanvasRef} className="min-h-0 flex-1 w-full border-b border-white/10 bg-slate-950" />
-
-          <pre className="h-[30%] overflow-auto bg-slate-950/95 p-3 text-[11px] text-lime-100/95">{debugText}</pre>
+          <canvas ref={stageCanvasRef} className="min-h-0 h-full w-full bg-slate-950" />
         </div>
 
         <button

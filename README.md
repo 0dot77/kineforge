@@ -27,9 +27,10 @@ Kineforge is built for dancers and media artists who want to prototype interacti
 - Extract face landmarks and expression cues
 - Extract hand landmarks and pinch/lift gestures
 - Compose overlay and mapping stages
-- Monitor reactive stage output in PiP
+- Keep final stage output continuously visible in bottom-right PiP
+- Keep frame/runtime status pinned in top-right status panel
 - Monitor runtime metrics (FPS, frame cost, CPU proxy load, heap memory, WebGPU availability)
-- Toggle debug preview per node
+- Toggle per-node preview and expand preview panel under each node
 - Double-click empty canvas to open node picker and spawn nodes
 
 ## Quick Controls
