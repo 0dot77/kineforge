@@ -20,6 +20,7 @@ Kineforge is built for dancers and media artists who want to prototype interacti
 - Tailwind CSS v4
 - React Flow (`@xyflow/react`)
 - MediaPipe Tasks Vision (Face + Hand)
+- Cloudflare Pages (static deploy)
 
 ## What You Can Do
 
@@ -56,6 +57,20 @@ Open: `http://localhost:4173`
 npm run build
 npm run start
 ```
+
+`npm run build` exports a static site to `out/`.
+
+## Cloudflare Pages Deploy
+
+```bash
+npm install
+npm run build
+npx wrangler login
+npx wrangler pages project create kineforge --production-branch main
+npm run deploy:pages
+```
+
+If the project already exists, skip `project create`.
 
 ## Notes
 

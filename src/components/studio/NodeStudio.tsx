@@ -6,7 +6,6 @@ import {
   BackgroundVariant,
   Controls,
   Handle,
-  MiniMap,
   Node,
   NodeProps,
   NodeTypes,
@@ -1756,11 +1755,6 @@ export function NodeStudio() {
         <Controls
           className="!rounded-xl !border !border-white/20 !bg-slate-900/75 !text-slate-100"
           showInteractive={false}
-        />
-        <MiniMap
-          className="!rounded-xl !border !border-white/20 !bg-slate-900/75"
-          nodeColor={(node) => (node.data as StudioNodeData).accent}
-          maskColor="rgba(2, 6, 23, 0.48)"
         />
       </ReactFlow>
 
