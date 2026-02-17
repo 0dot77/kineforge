@@ -12,10 +12,11 @@ import {
   NodeTypes,
   Position,
   ReactFlow,
+  addEdge,
   useEdgesState,
   useNodesState,
 } from '@xyflow/react';
-import type { Edge, ReactFlowInstance } from '@xyflow/react';
+import type { Connection, Edge, ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Activity, Camera, Eye, EyeOff, Grip, Hand, ScanFace, Sparkles, Trash2, WandSparkles } from 'lucide-react';
 import type { FaceLandmarker, HandLandmarker } from '@mediapipe/tasks-vision';
@@ -113,6 +114,15 @@ interface RuntimeMonitor {
   memoryMb: number | null;
   webgpuSupported: boolean;
   webgpuLabel: string;
+}
+
+interface PipelineState {
+  stageEnabled: boolean;
+  webcamEnabled: boolean;
+  faceEnabled: boolean;
+  handEnabled: boolean;
+  overlayEnabled: boolean;
+  mapperEnabled: boolean;
 }
 
 interface CoverTransform {
@@ -540,6 +550,88 @@ function buildMetricsBySource(
   return [`presence: ${controls.presence.toFixed(2)}`, `radius: ${Math.round(radius)}`];
 }
 
+function collectReachable(startIds: string[], adjacency: Map<string, string[]>): Set<string> {
+  const visited = new Set<string>();
+  const queue = [...startIds];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) continue;
+    visited.add(current);
+    const nextNodes = adjacency.get(current) ?? [];
+    for (const next of nextNodes) {
+      if (!visited.has(next)) queue.push(next);
+    }
+  }
+
+  return visited;
+}
+
+function computePipelineState(nodes: StudioNode[], edges: Edge[]): PipelineState {
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
+  const forwardAdj = new Map<string, string[]>();
+  const reverseAdj = new Map<string, string[]>();
+
+  for (const edge of edges) {
+    if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) continue;
+    const nextForward = forwardAdj.get(edge.source) ?? [];
+    nextForward.push(edge.target);
+    forwardAdj.set(edge.source, nextForward);
+
+    const nextReverse = reverseAdj.get(edge.target) ?? [];
+    nextReverse.push(edge.source);
+    reverseAdj.set(edge.target, nextReverse);
+  }
+
+  const webcamIds = nodes.filter((node) => node.data.previewSource === 'webcam').map((node) => node.id);
+  const stageIds = nodes.filter((node) => node.data.previewSource === 'stage').map((node) => node.id);
+
+  if (webcamIds.length === 0 || stageIds.length === 0) {
+    return {
+      stageEnabled: false,
+      webcamEnabled: false,
+      faceEnabled: false,
+      handEnabled: false,
+      overlayEnabled: false,
+      mapperEnabled: false,
+    };
+  }
+
+  const reachableFromWebcam = collectReachable(webcamIds, forwardAdj);
+  const ancestorsOfStage = collectReachable(stageIds, reverseAdj);
+
+  const effectiveNodeIds = new Set<string>();
+  for (const id of reachableFromWebcam) {
+    if (ancestorsOfStage.has(id)) {
+      effectiveNodeIds.add(id);
+    }
+  }
+
+  const stageEnabled = stageIds.some((id) => effectiveNodeIds.has(id));
+  if (!stageEnabled) {
+    return {
+      stageEnabled: false,
+      webcamEnabled: false,
+      faceEnabled: false,
+      handEnabled: false,
+      overlayEnabled: false,
+      mapperEnabled: false,
+    };
+  }
+
+  const hasSource = (source: PreviewKey): boolean =>
+    nodes.some((node) => effectiveNodeIds.has(node.id) && node.data.previewSource === source);
+
+  return {
+    stageEnabled,
+    webcamEnabled: hasSource('webcam'),
+    faceEnabled: hasSource('face'),
+    handEnabled: hasSource('hand'),
+    overlayEnabled: hasSource('overlay'),
+    mapperEnabled: hasSource('mapper'),
+  };
+}
+
 function drawCoverImage(
   ctx: CanvasRenderingContext2D,
   image: CanvasImageSource,
@@ -809,6 +901,7 @@ export function NodeStudio() {
   });
 
   const nodesRef = useRef<StudioNode[]>(INITIAL_NODES);
+  const edgesRef = useRef<Edge[]>(INITIAL_EDGES);
   const nodeIdCounterRef = useRef(1);
   const lastPaneClickRef = useRef(0);
   const reactFlowInstanceRef = useRef<ReactFlowInstance<StudioNode, Edge> | null>(null);
@@ -861,6 +954,24 @@ export function NodeStudio() {
       });
     },
     [setNodes]
+  );
+
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      setEdges((prevEdges) => {
+        const nextEdges = addEdge(
+          {
+            ...connection,
+            animated: true,
+            style: { stroke: '#84cc16', strokeWidth: 2.5 },
+          },
+          prevEdges
+        );
+        edgesRef.current = nextEdges;
+        return nextEdges;
+      });
+    },
+    [setEdges]
   );
 
   const nodeTypes = useMemo<NodeTypes>(
@@ -1034,6 +1145,10 @@ export function NodeStudio() {
   }, [nodes]);
 
   useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
+
+  useEffect(() => {
     if (!nodePicker.open) return;
     const rafId = requestAnimationFrame(() => {
       pickerInputRef.current?.focus();
@@ -1152,7 +1267,14 @@ export function NodeStudio() {
   }, []);
 
   const drawPipStage = useCallback(
-    (sourceFrame: HTMLCanvasElement, faces: Landmark[][], hands: Landmark[][], controls: ControlsMetrics, fps: number) => {
+    (
+      sourceFrame: HTMLCanvasElement,
+      faces: Landmark[][],
+      hands: Landmark[][],
+      controls: ControlsMetrics,
+      fps: number,
+      pipeline: PipelineState
+    ) => {
       const stage = stageCanvasRef.current;
       if (!stage) return;
 
@@ -1176,42 +1298,57 @@ export function NodeStudio() {
       ctx.fillStyle = '#070d1d';
       ctx.fillRect(0, 0, cssWidth, cssHeight);
 
+      if (!pipeline.stageEnabled || !pipeline.webcamEnabled) {
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.85)';
+        ctx.font = '13px var(--font-body)';
+        ctx.fillText('No active output chain', 18, 30);
+        ctx.font = '11px var(--font-body)';
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.65)';
+        ctx.fillText('Connect webcam -> ... -> stage', 18, 48);
+        return;
+      }
+
       ctx.save();
       ctx.globalAlpha = 0.92;
       const stageCover = drawCoverImage(ctx, sourceFrame, cssWidth, cssHeight);
       ctx.restore();
 
-      if (faces[0]) {
+      if (pipeline.overlayEnabled && faces[0]) {
         drawPoints(ctx, faces[0], '#bef264', 1.35, 5, stageCover ?? undefined);
       }
 
-      for (const hand of hands) {
-        drawHandConnections(ctx, hand, '#84cc16', stageCover ?? undefined);
-        drawPoints(ctx, hand, '#d9f99d', 1.8, 1, stageCover ?? undefined);
+      if (pipeline.overlayEnabled) {
+        for (const hand of hands) {
+          drawHandConnections(ctx, hand, '#84cc16', stageCover ?? undefined);
+          drawPoints(ctx, hand, '#d9f99d', 1.8, 1, stageCover ?? undefined);
+        }
       }
 
-      const centerX = cssWidth * clamp(0.5 + controls.tilt * 1.1, 0.08, 0.92);
-      const centerY = cssHeight * clamp(0.73 - controls.lift * 0.83, 0.1, 0.9);
-      const radius = computeStageRadius(controls, Math.min(cssWidth, cssHeight));
+      if (pipeline.mapperEnabled) {
+        const centerX = cssWidth * clamp(0.5 + controls.tilt * 1.1, 0.08, 0.92);
+        const centerY = cssHeight * clamp(0.73 - controls.lift * 0.83, 0.1, 0.9);
+        const radius = computeStageRadius(controls, Math.min(cssWidth, cssHeight));
 
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-      const gradient = ctx.createRadialGradient(centerX, centerY, 8, centerX, centerY, radius);
-      gradient.addColorStop(0, 'hsla(84, 95%, 70%, 0.5)');
-      gradient.addColorStop(0.55, 'hsla(88, 88%, 56%, 0.22)');
-      gradient.addColorStop(1, 'hsla(84, 70%, 25%, 0)');
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const gradient = ctx.createRadialGradient(centerX, centerY, 8, centerX, centerY, radius);
+        gradient.addColorStop(0, 'hsla(84, 95%, 70%, 0.5)');
+        gradient.addColorStop(0.55, 'hsla(88, 88%, 56%, 0.22)');
+        gradient.addColorStop(1, 'hsla(84, 70%, 25%, 0)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
 
       ctx.fillStyle = 'rgba(2, 6, 23, 0.65)';
       ctx.fillRect(10, 10, 130, 42);
       ctx.fillStyle = '#d9f99d';
       ctx.font = '11px var(--font-body)';
       ctx.fillText(`fps: ${fps.toFixed(1)}`, 20, 28);
-      ctx.fillText(`presence: ${controls.presence.toFixed(2)}`, 20, 44);
+      const modeLabel = `${pipeline.overlayEnabled ? 'overlay' : 'raw'} + ${pipeline.mapperEnabled ? 'mapper' : 'pass'}`;
+      ctx.fillText(`mode: ${modeLabel}`, 20, 44);
     },
     []
   );
@@ -1393,11 +1530,20 @@ export function NodeStudio() {
         frameCtx.drawImage(videoRef.current, 0, 0, videoWidth, videoHeight);
         frameCtx.restore();
 
-        const faceResult = runtime.faceLandmarker.detectForVideo(frameCanvas, timestamp);
-        const handResult = runtime.handLandmarker.detectForVideo(frameCanvas, timestamp);
+        const pipeline = computePipelineState(nodesRef.current, edgesRef.current);
+        const previewSources = new Set(
+          nodesRef.current.filter((node) => node.data.previewEnabled).map((node) => node.data.previewSource)
+        );
+        const needsFaceDetection =
+          pipeline.faceEnabled || pipeline.overlayEnabled || pipeline.mapperEnabled || previewSources.has('face') || previewSources.has('overlay') || previewSources.has('mapper');
+        const needsHandDetection =
+          pipeline.handEnabled || pipeline.overlayEnabled || pipeline.mapperEnabled || previewSources.has('hand') || previewSources.has('overlay') || previewSources.has('mapper');
 
-        const faces = (faceResult.faceLandmarks ?? []) as Landmark[][];
-        const hands = (handResult.landmarks ?? []) as Landmark[][];
+        const faceResult = needsFaceDetection ? runtime.faceLandmarker.detectForVideo(frameCanvas, timestamp) : null;
+        const handResult = needsHandDetection ? runtime.handLandmarker.detectForVideo(frameCanvas, timestamp) : null;
+
+        const faces = ((faceResult?.faceLandmarks ?? []) as Landmark[][]) ?? [];
+        const hands = ((handResult?.landmarks ?? []) as Landmark[][]) ?? [];
 
         const facePrimary = faces[0];
         const handPrimary = hands[0];
@@ -1452,7 +1598,7 @@ export function NodeStudio() {
         runtime.frameCount += 1;
         const fps = delta > 0 ? 1000 / delta : 0;
 
-        drawPipStage(frameCanvas, faces, hands, controls, fps);
+        drawPipStage(frameCanvas, faces, hands, controls, fps, pipeline);
 
         if (timestamp - runtime.lastUiUpdate > 180) {
           runtime.lastUiUpdate = timestamp;
@@ -1491,14 +1637,15 @@ export function NodeStudio() {
                   count: faces.length,
                   jaw: Number(controls.jaw.toFixed(4)),
                 },
-                hand: {
-                  count: hands.length,
-                  pinch: Number(controls.pinch.toFixed(4)),
-                  lift: Number(controls.lift.toFixed(4)),
-                  pinchDistance: Number(pinchDistance.toFixed(4)),
+                  hand: {
+                    count: hands.length,
+                    pinch: Number(controls.pinch.toFixed(4)),
+                    lift: Number(controls.lift.toFixed(4)),
+                    pinchDistance: Number(pinchDistance.toFixed(4)),
+                  },
+                  pipeline,
+                  controls,
                 },
-                controls,
-              },
               null,
               2
             )
@@ -1583,6 +1730,7 @@ export function NodeStudio() {
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
         onPaneClick={handlePaneClick}
         onInit={(instance) => {
           reactFlowInstanceRef.current = instance;
