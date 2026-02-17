@@ -17,9 +17,8 @@ import {
 } from '@xyflow/react';
 import type { Edge, ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Activity, Camera, Eye, EyeOff, Grip, Hand, ScanFace, Sparkles, WandSparkles } from 'lucide-react';
+import { Activity, Camera, Eye, EyeOff, Grip, Hand, ScanFace, Sparkles, Trash2, WandSparkles } from 'lucide-react';
 import type { FaceLandmarker, HandLandmarker } from '@mediapipe/tasks-vision';
-import Image from 'next/image';
 
 type NodeKind = 'source' | 'extract' | 'compose' | 'map' | 'output';
 
@@ -101,8 +100,33 @@ interface RuntimeState {
   frameCount: number;
   lastFrameTimestamp: number;
   lastUiUpdate: number;
+  frameCostMs: number;
   smoothedControls: ControlsMetrics;
   previewCanvases: Record<PreviewKey, HTMLCanvasElement | null>;
+}
+
+interface RuntimeMonitor {
+  fps: number;
+  frameMs: number;
+  loadPercent: number;
+  memoryMb: number | null;
+  webgpuSupported: boolean;
+  webgpuLabel: string;
+}
+
+interface WebGpuAdapterInfoLike {
+  vendor?: string;
+  architecture?: string;
+  device?: string;
+  description?: string;
+}
+
+interface WebGpuAdapterLike {
+  requestAdapterInfo?: () => Promise<WebGpuAdapterInfoLike>;
+}
+
+interface WebGpuLike {
+  requestAdapter: () => Promise<WebGpuAdapterLike | null>;
 }
 
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm';
@@ -625,6 +649,15 @@ function StatusBadge({ status, label }: { status: 'idle' | 'loading' | 'live' | 
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${className}`}>{label}</span>;
 }
 
+function MonitorStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-slate-900/75 px-2.5 py-2">
+      <p className="text-[9px] uppercase tracking-[0.16em] text-slate-400/90">{label}</p>
+      <p className="mt-1 text-xs font-medium text-lime-100">{value}</p>
+    </div>
+  );
+}
+
 function ModernNodeCard({
   id,
   data,
@@ -716,10 +749,18 @@ function ModernNodeCard({
 
 export function NodeStudio() {
   const [nodes, setNodes, onNodesChange] = useNodesState<StudioNode>(INITIAL_NODES);
-  const [edges, , onEdgesChange] = useEdgesState(INITIAL_EDGES);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
   const [status, setStatus] = useState<'idle' | 'loading' | 'live' | 'error'>('idle');
   const [statusText, setStatusText] = useState('Idle');
-  const [debugText, setDebugText] = useState('No frames yet. Click "Start Live".');
+  const [debugText, setDebugText] = useState('No frames yet. Tap the Live icon to start camera access.');
+  const [runtimeMonitor, setRuntimeMonitor] = useState<RuntimeMonitor>({
+    fps: 0,
+    frameMs: 0,
+    loadPercent: 0,
+    memoryMb: null,
+    webgpuSupported: false,
+    webgpuLabel: 'Detecting...',
+  });
   const [pipSize, setPipSize] = useState({ width: 480, height: 330 });
   const [isResizingPip, setIsResizingPip] = useState(false);
   const [nodePicker, setNodePicker] = useState<NodePickerState>({
@@ -751,6 +792,7 @@ export function NodeStudio() {
     frameCount: 0,
     lastFrameTimestamp: 0,
     lastUiUpdate: 0,
+    frameCostMs: 0,
     smoothedControls: { ...EMPTY_CONTROLS },
     previewCanvases: {
       webcam: createPreviewCanvas(),
@@ -934,6 +976,13 @@ export function NodeStudio() {
       videoRef.current.srcObject = null;
     }
 
+    runtime.frameCostMs = 0;
+    setRuntimeMonitor((prev) => ({
+      ...prev,
+      fps: 0,
+      frameMs: 0,
+      loadPercent: 0,
+    }));
     setStudioStatus('idle', 'Camera stopped');
   }, [setStudioStatus]);
 
@@ -970,6 +1019,73 @@ export function NodeStudio() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [closeNodePicker, filteredLibrary, nodePicker.open, spawnNodeFromTemplate]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const detectWebGpu = async () => {
+      const nav = navigator as Navigator & { gpu?: WebGpuLike };
+      if (!nav.gpu) {
+        if (!cancelled) {
+          setRuntimeMonitor((prev) => ({
+            ...prev,
+            webgpuSupported: false,
+            webgpuLabel: 'Unavailable',
+          }));
+        }
+        return;
+      }
+
+      try {
+        const adapter = await nav.gpu.requestAdapter();
+        if (!adapter) {
+          if (!cancelled) {
+            setRuntimeMonitor((prev) => ({
+              ...prev,
+              webgpuSupported: false,
+              webgpuLabel: 'No adapter',
+            }));
+          }
+          return;
+        }
+
+        let label = 'Adapter ready';
+        if (adapter.requestAdapterInfo) {
+          try {
+            const info = await adapter.requestAdapterInfo();
+            const parts = [info.vendor, info.architecture, info.device, info.description].filter((value) => Boolean(value));
+            if (parts.length > 0) {
+              label = parts.join(' · ');
+            }
+          } catch {
+            // keep default label
+          }
+        }
+
+        if (!cancelled) {
+          setRuntimeMonitor((prev) => ({
+            ...prev,
+            webgpuSupported: true,
+            webgpuLabel: label,
+          }));
+        }
+      } catch {
+        if (!cancelled) {
+          setRuntimeMonitor((prev) => ({
+            ...prev,
+            webgpuSupported: false,
+            webgpuLabel: 'Detection failed',
+          }));
+        }
+      }
+    };
+
+    void detectWebGpu();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const originalWarn = console.warn.bind(console);
@@ -1207,6 +1323,8 @@ export function NodeStudio() {
       setStudioStatus('live', 'Live capture running');
 
       const runFrame = (timestamp: number) => {
+        const frameStart = performance.now();
+
         if (!videoRef.current || !runtime.stream || !runtime.faceLandmarker || !runtime.handLandmarker) {
           runtime.rafId = requestAnimationFrame(runFrame);
           return;
@@ -1306,6 +1424,21 @@ export function NodeStudio() {
           const radius = computeStageRadius(controls, Math.max(240, maxDim));
           updateNodeSnapshots(frameCanvas, faces, hands, controls, fps, radius);
 
+          const frameCostRaw = performance.now() - frameStart;
+          runtime.frameCostMs =
+            runtime.frameCostMs > 0 ? runtime.frameCostMs + (frameCostRaw - runtime.frameCostMs) * 0.22 : frameCostRaw;
+          const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
+          const memoryMb = memory?.usedJSHeapSize ? memory.usedJSHeapSize / (1024 * 1024) : null;
+          const loadPercent = clampNumber((runtime.frameCostMs / 16.7) * 100, 0, 260);
+
+          setRuntimeMonitor((prev) => ({
+            ...prev,
+            fps: Number.isFinite(fps) ? Number(fps.toFixed(1)) : 0,
+            frameMs: Number(runtime.frameCostMs.toFixed(2)),
+            loadPercent: Number(loadPercent.toFixed(1)),
+            memoryMb: memoryMb !== null ? Number(memoryMb.toFixed(1)) : null,
+          }));
+
           const activePreviewNodes = nodesRef.current
             .filter((node) => node.data.previewEnabled)
             .map((node) => `${node.data.title} (${node.id})`);
@@ -1346,13 +1479,23 @@ export function NodeStudio() {
     }
   }, [drawPipStage, ensureModels, setStudioStatus, updateNodeSnapshots]);
 
+  const toggleLive = useCallback(() => {
+    if (status === 'live' || status === 'loading') {
+      stopLive();
+      return;
+    }
+    void startLive();
+  }, [startLive, status, stopLive]);
+
   const resetLayout = useCallback(() => {
     stopLive();
-    nodesRef.current = INITIAL_NODES;
-    setNodes(INITIAL_NODES);
-    setStudioStatus('idle', 'Graph reset');
-    setDebugText('Graph reset. Click "Start Live". Node previews are off by default.');
-  }, [setNodes, setStudioStatus, stopLive]);
+    nodesRef.current = [];
+    nodeIdCounterRef.current = 1;
+    setNodes([]);
+    setEdges([]);
+    setStudioStatus('idle', 'Graph cleared');
+    setDebugText('Graph cleared. Double-click empty canvas to spawn new nodes.');
+  }, [setEdges, setNodes, setStudioStatus, stopLive]);
 
   const startResizePip = useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -1428,48 +1571,41 @@ export function NodeStudio() {
         />
       </ReactFlow>
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center px-3 pt-4">
-        <header className="pointer-events-auto flex w-full max-w-[1180px] items-end justify-between gap-4 rounded-2xl border border-white/12 bg-slate-950/72 px-4 py-3 shadow-[0_24px_80px_rgba(2,6,23,0.6)] backdrop-blur-xl">
-          <div className="flex items-start gap-3">
-            <div className="mt-0.5 grid h-11 w-11 place-items-center rounded-xl border border-lime-300/25 bg-slate-900/80">
-              <Image src="/brand/kineforge-mark.svg" alt="Kineforge mark" width={30} height={30} />
-            </div>
-            <div>
-              <p className="text-[10px] uppercase tracking-[0.24em] text-lime-300/85">Kineforge</p>
-              <h1 className="mt-1 text-xl font-semibold text-white">Node Forge for Motion + Media</h1>
-              <p className="mt-1 text-xs text-slate-300/80">
-              우측 하단 메인 모니터는 항상 라이브입니다. 보드 빈 공간 더블클릭으로 노드 검색 패널을 열어 언리얼 머티리얼 에디터처럼 꺼내 쓰세요.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={startLive}
-              className="rounded-xl border border-lime-300/35 bg-lime-500/15 px-4 py-2 text-sm font-medium text-lime-100 transition hover:bg-lime-400/25"
-            >
-              Start Live
-            </button>
-            <button
-              type="button"
-              onClick={stopLive}
-              className="rounded-xl border border-rose-300/35 bg-rose-500/15 px-4 py-2 text-sm font-medium text-rose-100 transition hover:bg-rose-400/25"
-            >
-              Stop
-            </button>
-            <button
-              type="button"
-              onClick={resetLayout}
-              className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10"
-            >
-              Reset Graph
-            </button>
-            <StatusBadge status={status} label={statusText} />
-          </div>
-        </header>
+      <div className="pointer-events-none fixed left-4 top-4 z-30 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={toggleLive}
+          className={`pointer-events-auto relative grid h-10 w-10 place-items-center rounded-xl border transition ${
+            status === 'live'
+              ? 'border-lime-300/45 bg-lime-500/20 text-lime-100 hover:bg-lime-400/25'
+              : status === 'loading'
+                ? 'border-amber-300/45 bg-amber-500/18 text-amber-100 hover:bg-amber-400/22'
+                : status === 'error'
+                  ? 'border-rose-300/45 bg-rose-500/20 text-rose-100 hover:bg-rose-400/24'
+                  : 'border-white/15 bg-slate-950/85 text-slate-100 hover:bg-slate-900/95'
+          }`}
+          title={status === 'live' || status === 'loading' ? 'Stop live capture' : 'Start live capture'}
+          aria-label={status === 'live' || status === 'loading' ? 'Stop live capture' : 'Start live capture'}
+        >
+          <Camera size={14} />
+          <span
+            className={`absolute right-[6px] top-[6px] h-2.5 w-2.5 rounded-full ${
+              status === 'live' ? 'animate-pulse bg-lime-300' : status === 'loading' ? 'bg-amber-300' : 'bg-slate-400'
+            }`}
+          />
+        </button>
+        <button
+          type="button"
+          onClick={resetLayout}
+          className="pointer-events-auto grid h-9 w-9 place-items-center rounded-xl border border-white/15 bg-slate-950/85 text-slate-200 transition hover:bg-slate-900/95"
+          title="Clear all nodes"
+          aria-label="Clear all nodes"
+        >
+          <Trash2 size={14} />
+        </button>
       </div>
-      <div className="pointer-events-none absolute left-4 top-[94px] z-20 rounded-xl border border-lime-300/20 bg-slate-950/75 px-3 py-2 text-[11px] text-lime-100/90 backdrop-blur-xl">
+
+      <div className="pointer-events-none absolute left-4 top-[58px] z-20 rounded-xl border border-lime-300/20 bg-slate-950/75 px-3 py-2 text-[11px] text-lime-100/90 backdrop-blur-xl">
         Double-click empty canvas to summon Kineforge node picker
       </div>
 
@@ -1537,9 +1673,25 @@ export function NodeStudio() {
             </div>
           </div>
 
-          <canvas ref={stageCanvasRef} className="h-[66%] w-full border-b border-white/10 bg-slate-950" />
+          <div className="border-b border-white/10 bg-slate-950/88 p-2.5">
+            <div className="grid grid-cols-2 gap-2">
+              <MonitorStat label="FPS" value={runtimeMonitor.fps.toFixed(1)} />
+              <MonitorStat label="Frame ms" value={runtimeMonitor.frameMs.toFixed(2)} />
+              <MonitorStat label="CPU Proxy" value={`${runtimeMonitor.loadPercent.toFixed(0)}%`} />
+              <MonitorStat label="Heap" value={runtimeMonitor.memoryMb !== null ? `${runtimeMonitor.memoryMb.toFixed(1)} MB` : 'n/a'} />
+            </div>
+            <p
+              className={`mt-2 text-[10px] ${
+                runtimeMonitor.webgpuSupported ? 'text-lime-200/90' : 'text-rose-200/90'
+              }`}
+            >
+              WebGPU: {runtimeMonitor.webgpuSupported ? runtimeMonitor.webgpuLabel : 'Unavailable'}
+            </p>
+          </div>
 
-          <pre className="h-[34%] overflow-auto bg-slate-950/95 p-3 text-[11px] text-lime-100/95">{debugText}</pre>
+          <canvas ref={stageCanvasRef} className="min-h-0 flex-1 w-full border-b border-white/10 bg-slate-950" />
+
+          <pre className="h-[30%] overflow-auto bg-slate-950/95 p-3 text-[11px] text-lime-100/95">{debugText}</pre>
         </div>
 
         <button

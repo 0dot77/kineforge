@@ -28,8 +28,15 @@ Kineforge is built for dancers and media artists who want to prototype interacti
 - Extract hand landmarks and pinch/lift gestures
 - Compose overlay and mapping stages
 - Monitor reactive stage output in PiP
+- Monitor runtime metrics (FPS, frame cost, CPU proxy load, heap memory, WebGPU availability)
 - Toggle debug preview per node
 - Double-click empty canvas to open node picker and spawn nodes
+
+## Quick Controls
+
+- `Live` icon: request camera access and toggle live processing
+- `Trash` icon: clear all nodes and edges from the board
+- Double-click empty canvas: open node picker at cursor position
 
 ## Development
 
@@ -53,4 +60,4 @@ npm run start
 
 - Camera permission is required.
 - Models are loaded from official MediaPipe model storage.
-- If graph layout gets messy, click `Reset Graph`.
+- CPU percentage shown in monitor is a main-thread frame-time proxy, not OS-level CPU usage.
