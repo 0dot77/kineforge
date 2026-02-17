@@ -62,6 +62,20 @@ npm run start
 
 ## Cloudflare Pages Deploy
 
+GitHub push to `main` is now set to auto-deploy via:
+
+- `.github/workflows/cloudflare-pages.yml`
+
+### One-Time Setup (GitHub Secrets)
+
+Add these secrets in `Settings > Secrets and variables > Actions`:
+
+- `CLOUDFLARE_API_TOKEN` (must include Pages write permission)
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_PROJECT_NAME` (optional, default is `kineforge`)
+
+### Manual Local Deploy
+
 ```bash
 npm install
 npm run build
